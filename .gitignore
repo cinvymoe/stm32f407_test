@@ -1,0 +1,37 @@
+# Rust项目编译输出
+/target/
+
+# 备份文件
+**/*.rs.bk
+
+# 可能包含敏感信息的本地配置文件
+.env
+
+# IDE和编辑器相关文件
+.idea/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/STM32F407.svd
+
+# 调试和日志文件
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.swp
+*.swo
+
+# 嵌入式开发相关
+*.bin
+*.elf
+*.hex
+*.map
+
+# 其他可能的临时文件
+*.tmp
+*.temp

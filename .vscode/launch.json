@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (DAPLink)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/target/thumbv7em-none-eabihf/debug/stm32f407_test",
+            "preLaunchTask": "Build (Debug)",
+            "device": "STM32F407VG",
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "svdFile": "${workspaceFolder}/.vscode/STM32F407.svd",
+            "runToEntryPoint": "main",
+            "armToolchainPath": "/root/.platformio/packages/toolchain-gccarmnoneeabi/bin"
+        },
+    ]
+}
