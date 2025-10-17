@@ -1,0 +1,11 @@
+{
+    "rust-analyzer.cargo.target": "thumbv7em-none-eabihf",
+    "rust-analyzer.check.allTargets": false,
+    "editor.formatOnSave": true,
+    "cortex-debug.gdbPath.linux": "/usr/bin/gdb-multiarch",
+    "cortex-debug.objdumpPath.linux": "/usr/bin/objdump",
+    "terminal.integrated.env.linux": {
+        "LANG": "C.UTF-8",
+        "LC_CTYPE": "C.UTF-8"
+    },
+}
