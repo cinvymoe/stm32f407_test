@@ -1,0 +1,12 @@
+{
+    "name": "Git 提交助手",
+    "version": "1.0.0",
+    "description": "在用户提到提交代码时，自动分析变更并生成符合 Conventional Commits 规范的提交信息",
+    "when": {
+        "type": "promptSubmit"
+    },
+    "then": {
+        "type": "askAgent",
+        "prompt": "如果用户消息中包含'提交'、'commit'、'git commit'等关键词，请：1) 运行 'git status' 检查变更 2) 分析变更的文件和内容 3) 根据 Conventional Commits 规范生成提交信息（格式：type(scope): subject）4) 显示生成的提交信息并询问用户确认 5) 确认后执行 git commit。如果用户消息不涉及 git 提交，忽略此提示。"
+    }
+}

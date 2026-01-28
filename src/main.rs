@@ -4,127 +4,185 @@
 use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
-use embassy_stm32::{peripherals, Config};
+use embassy_stm32::sdmmc::{Config as SdmmcConfig, Sdmmc};
+use embassy_stm32::{bind_interrupts, peripherals, sdmmc, Config};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
-use panic_halt as _;
-use static_cell::StaticCell;
+use embassy_sync::mutex::Mutex;
+use panic_probe as _;
+use stm32f407_sd_bootloader::boot_manager::BootManager;
+use stm32f407_sd_bootloader::button_input::ButtonInput;
+use stm32f407_sd_bootloader::config;
+use stm32f407_sd_bootloader::led_indicator::LedIndicator;
 
-// 使用Embassy的时间驱动 - TIM2作为时间源
-// 时间驱动已在Cargo.toml中通过特性启用
-// 创建两个全局信号分别用于控制两个LED状态
-static LED1_CONTROL: StaticCell<Signal<CriticalSectionRawMutex, bool>> = StaticCell::new();
+bind_interrupts!(struct Irqs {
+    SDIO => sdmmc::InterruptHandler<peripherals::SDIO>;
+});
+
+// Global watchdog instance for feeding during long operations
+type WatchdogType = embassy_stm32::wdg::IndependentWatchdog<'static, peripherals::IWDG>;
+static WATCHDOG: Mutex<CriticalSectionRawMutex, Option<WatchdogType>> = Mutex::new(None);
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    info!("Program start");
+async fn main(_spawner: Spawner) {
+    info!("STM32F407 SD Card Bootloader v1.0.0");
+    info!("Initializing hardware...");
 
-    // 配置系统
-    let config = Config::default();
-    let p = embassy_stm32::init(config);
+    // Configure embassy with STM32F407 clock settings
+    let mut embassy_config = Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        // Configure HSE (8 MHz external oscillator)
+        embassy_config.rcc.hse = Some(Hse {
+            freq: embassy_stm32::time::Hertz(8_000_000),
+            mode: HseMode::Oscillator,
+        });
+        // Configure PLL for 168 MHz system clock
+        embassy_config.rcc.pll_src = PllSource::HSE;
+        embassy_config.rcc.pll = Some(Pll {
+            prediv: PllPreDiv::DIV4,
+            mul: PllMul::MUL168,
+            divp: Some(PllPDiv::DIV2), // 168 MHz
+            divq: Some(PllQDiv::DIV7), // 48 MHz for USB/SDIO
+            divr: None,
+        });
+        embassy_config.rcc.ahb_pre = AHBPrescaler::DIV1;
+        embassy_config.rcc.apb1_pre = APBPrescaler::DIV4; // 42 MHz
+        embassy_config.rcc.apb2_pre = APBPrescaler::DIV2; // 84 MHz
+        embassy_config.rcc.sys = Sysclk::PLL1_P;
+    }
 
-    // 初始化LED控制信号
-    let led1_signal = LED1_CONTROL.init(Signal::new());
+    // Initialize STM32 peripherals
+    let p = embassy_stm32::init(embassy_config);
 
-    // 启动按键监控任务 - PE4控制PA7，PE3控制PA6
-    spawner.spawn(button1_task(p.PE4, led1_signal)).unwrap();
+    info!("Hardware initialized successfully");
+    info!("System clock: 168 MHz");
+    info!("APB1 clock: 42 MHz");
+    info!("APB2 clock: 84 MHz");
 
-    // 启动LED控制任务
-    spawner
-        .spawn(led1_control_task(p.PA7, led1_signal))
-        .unwrap();
-    spawner.spawn(led2_control_task(p.PA6)).unwrap();
+    // Display flash partition configuration
+    // Note: Partition layout is compatible with embassy-boot framework
+    // - Bootloader: 64KB at 0x08000000
+    // - Slot A (Active): 512KB at 0x08010000
+    // - Slot B (Update): 512KB at 0x08090000
+    // - Boot State: 64KB at 0x08110000
+    // Boot state management is implemented in boot_state.rs and flash_manager.rs
+    info!("Flash partitions configured:");
+    info!(
+        "  Bootloader: 0x{:08X} - 0x{:08X} ({}KB)",
+        config::FLASH_CONFIG.bootloader_start,
+        config::FLASH_CONFIG.bootloader_start + config::FLASH_CONFIG.bootloader_size,
+        config::FLASH_CONFIG.bootloader_size / 1024
+    );
+    info!(
+        "  Slot A:     0x{:08X} - 0x{:08X} ({}KB)",
+        config::FLASH_CONFIG.slot_a_start,
+        config::FLASH_CONFIG.slot_a_start + config::FLASH_CONFIG.slot_a_size,
+        config::FLASH_CONFIG.slot_a_size / 1024
+    );
+    info!(
+        "  Slot B:     0x{:08X} - 0x{:08X} ({}KB)",
+        config::FLASH_CONFIG.slot_b_start,
+        config::FLASH_CONFIG.slot_b_start + config::FLASH_CONFIG.slot_b_size,
+        config::FLASH_CONFIG.slot_b_size / 1024
+    );
+    info!(
+        "  State:      0x{:08X} - 0x{:08X} ({}KB)",
+        config::FLASH_CONFIG.state_start,
+        config::FLASH_CONFIG.state_start + config::FLASH_CONFIG.state_size,
+        config::FLASH_CONFIG.state_size / 1024
+    );
+
+    // Initialize GPIO peripherals
+    info!("Initializing GPIO peripherals...");
+
+    // Initialize button input (PE4, pull-up, active low)
+    let button = ButtonInput::new(p.PE4.into());
+    info!("Button input initialized (PE4)");
+
+    // Initialize LED indicators
+    // PA7: Status LED
+    // PA6: Heartbeat LED
+    let led = LedIndicator::new(p.PA7.into(), p.PA6.into());
+    info!("LED indicators initialized (PA6, PA7)");
+
+    // Initialize Flash in blocking mode (STM32F4 limitation)
+    // Note: FlashManager expects async Flash, but we'll use blocking mode
+    // and the async operations will block internally
+    info!("Initializing Flash manager...");
+    use embassy_stm32::flash::Flash;
+    let flash = Flash::new_blocking(p.FLASH);
+    let flash_manager = stm32f407_sd_bootloader::flash_manager::FlashManager::new(flash);
+    info!("Flash manager initialized");
+
+    // Initialize Independent Watchdog (IWDG) for system reliability
+    // Watchdog timeout: ~10 seconds (allows time for SD card operations and Flash writes)
+    // The watchdog will automatically reset the system if it's not fed within this time
+    // Note: The watchdog is fed periodically by a background task
+    info!("Initializing watchdog...");
+    use embassy_stm32::wdg::IndependentWatchdog;
+    let mut watchdog = IndependentWatchdog::new(p.IWDG, 10_000_000); // 10 second timeout
+    watchdog.unleash();
+
+    // Store watchdog in global mutex
+    {
+        let mut wdg = WATCHDOG.lock().await;
+        *wdg = Some(watchdog);
+    }
+    info!("Watchdog initialized (10s timeout)");
+
+    // Spawn watchdog feeding task to prevent system reset during long operations
+    _spawner.spawn(watchdog_feeder_task()).ok();
+
+    // Initialize SDMMC for SD card access (will be passed to boot manager)
+    info!("Preparing SDMMC peripheral...");
+    let sdmmc_config = SdmmcConfig::default();
+
+    let sdmmc = Sdmmc::new_4bit(
+        p.SDIO,
+        Irqs,
+        p.DMA2_CH3,
+        p.PC12, // CK
+        p.PD2,  // CMD
+        p.PC8,  // D0
+        p.PC9,  // D1
+        p.PC10, // D2
+        p.PC11, // D3
+        sdmmc_config,
+    );
+    info!("SDMMC peripheral configured");
+
+    // Create and initialize BootManager
+    info!("Creating boot manager...");
+    let mut boot_manager = BootManager::new(flash_manager, button, led);
+
+    info!("Bootloader initialization complete");
+    info!("Starting bootloader main loop...");
+
+    // Run bootloader main loop (never returns)
+    boot_manager.run(Some(sdmmc)).await;
 }
 
-// PE4按键监控任务 - 控制PA7 LED
+/// Watchdog feeder task
+///
+/// This task runs in the background and periodically feeds the watchdog
+/// to prevent system reset during long operations like SD card reads
+/// and Flash writes.
+///
+/// The task feeds the watchdog every 5 seconds (half of the 10 second timeout)
+/// to ensure the system doesn't reset during normal operation.
 #[embassy_executor::task]
-async fn button1_task(
-    pin: peripherals::PE4,
-    signal: &'static Signal<CriticalSectionRawMutex, bool>,
-) {
-    let button = Input::new(pin, Pull::Up);
-    let mut led_state = false;
-    let mut prev_state = true; // 上拉模式下，未按下时为高电平
+async fn watchdog_feeder_task() {
+    use embassy_time::{Duration, Timer};
 
     loop {
-        let current_state = button.is_high();
+        // Wait 5 seconds (half of watchdog timeout)
+        Timer::after(Duration::from_secs(5)).await;
 
-        // 检测按键按下（从高电平变为低电平）
-        if prev_state && !current_state {
-            // 按键按下，切换LED状态
-            led_state = !led_state;
-            signal.signal(led_state);
-            info!("LED1 state changed: {}", led_state);
+        // Feed the watchdog
+        let mut wdg = WATCHDOG.lock().await;
+        if let Some(watchdog) = wdg.as_mut() {
+            watchdog.pet();
+            defmt::trace!("Watchdog fed");
         }
-        // info!("LED1 state: {}", led_state);
-
-        prev_state = current_state;
-        Timer::after(Duration::from_millis(20)).await; // 消抖延时
     }
 }
-
-// PE3按键监控任务 - 控制PA6 LED
-#[embassy_executor::task]
-async fn button2_task(
-    pin: peripherals::PE3,
-    signal: &'static Signal<CriticalSectionRawMutex, bool>,
-) {
-    let button = Input::new(pin, Pull::Up);
-    let mut led_state = false;
-    let mut prev_state = true; // 上拉模式下，未按下时为高电平
-
-    loop {
-        let current_state = button.is_high();
-
-        // 检测按键按下（从高电平变为低电平）
-        if prev_state && !current_state {
-            // 按键按下，切换LED状态
-            led_state = !led_state;
-            signal.signal(led_state);
-        }
-
-        prev_state = current_state;
-        Timer::after(Duration::from_millis(20)).await; // 消抖延时
-    }
-}
-
-// PA7 LED控制任务
-#[embassy_executor::task]
-async fn led1_control_task(
-    pin: peripherals::PA7,
-    signal: &'static Signal<CriticalSectionRawMutex, bool>,
-) {
-    let mut led = Output::new(pin, Level::Low, Speed::Low);
-
-    loop {
-        // 等待信号变化
-        let led_on = signal.wait().await;
-
-        if led_on {
-            // 打开LED
-            led.set_high();
-            info!("LED1 OFF");
-        } else {
-            // 关闭LED
-            led.set_low();
-            info!("LED1 ON");
-        }
-    }
-}
-
-// PA6 LED控制任务
-#[embassy_executor::task]
-async fn led2_control_task(pin: peripherals::PA6) {
-    let mut led = Output::new(pin, Level::Low, Speed::Low);
-
-    loop {
-        led.toggle();
-        let state = if led.is_set_high() { "ON " } else { "OFF " };
-        info!("LED2 state: {}", state);
-        Timer::after(Duration::from_millis(1000)).await;
-    }
-}
-
-// 注意：原来的button_task和led_control_task已被拆分为独立的任务，实现PE4控制PA7，PE3控制PA6
