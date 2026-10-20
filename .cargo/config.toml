@@ -1,6 +1,7 @@
 [target.thumbv7em-none-eabihf]
-# runner = "arm-none-eabi-gdb -q -x openocd.gdb"
+# Use probe-rs for flashing and debugging
 runner = "probe-rs run --chip STM32F407VG --protocol swd"
+
 rustflags = [
   "-C",
   "link-arg=--nmagic",
@@ -8,12 +9,17 @@ rustflags = [
   "link-arg=-Tlink.x",
   "-C",
   "link-arg=-Tdefmt.x",
+  # Optimize for size
+  "-C",
+  "inline-threshold=5",
+  "-C",
+  "no-vectorize-loops",
 ]
+
 [build]
 target = "thumbv7em-none-eabihf"
 
-# 使用此配置可以在没有标准库的情况下进行调试
-[target.'cfg(all(target_arch = "arm", target_os = "none"))']
-
+# Environment variables
 [env]
-DEFMT_LOG = "trace"
+# Set defmt log level (trace, debug, info, warn, error)
+DEFMT_LOG = "info"

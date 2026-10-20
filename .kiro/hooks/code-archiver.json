@@ -1,0 +1,12 @@
+{
+    "name": "代码归档助手",
+    "version": "1.0.0",
+    "description": "在 Agent 完成任务后，自动检查并归档新创建的文件，保持项目结构整洁",
+    "when": {
+        "type": "agentStop"
+    },
+    "then": {
+        "type": "askAgent",
+        "prompt": "请检查刚才创建或修改的文件，根据文件类型和用途进行归档整理：1) 示例/测试文件 -> examples/ 或 tests/ 目录 2) 文档文件 -> docs/ 目录 3) 配置文件 -> config/ 目录 4) 临时/实验文件 -> temp/ 或 experiments/ 目录。如果文件已经在合适位置，无需移动。移动文件后简要说明归档结果。"
+    }
+}
